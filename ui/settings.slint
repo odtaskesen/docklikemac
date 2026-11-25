@@ -1,0 +1,279 @@
+import { Slider, Switch, ComboBox, Button, ScrollView } from "std-widgets.slint";
+
+// Kart satırı: solda etiket (+ isteğe bağlı ipucu), sağda denetim (@children).
+component Row inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> last: false;
+    height: 44px;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            Text {
+                text: root.label;
+                color: white;
+                font-size: 13px;
+            }
+            if root.hint != "": Text {
+                text: root.hint;
+                color: #ffffffa0;
+                font-size: 11px;
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        @children
+    }
+
+    // Alt ayırıcı çizgi
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        x: 14px;
+        width: parent.width - 28px;
+        height: 1px;
+        background: #ffffff10;
+    }
+}
+
+// Yuvarlak köşeli kart
+component Card inherits Rectangle {
+    background: #2b2b2b;
+    border-radius: 8px;
+    VerticalLayout {
+        @children
+    }
+}
+
+// Bölüm başlığı
+component SectionTitle inherits Text {
+    color: #ffffffa0;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+// Sağdaki değer etiketi
+component ValueLabel inherits Text {
+    color: #ffffffa0;
+    font-size: 13px;
+    horizontal-alignment: right;
+    vertical-alignment: center;
+    min-width: 48px;
+}
+
+export component SettingsWindow inherits Window {
+    title: "Dock Ayarları";
+    // Dock boyutu ölçeği 0.75..1.25 (gösterim: yüzde, ör. "%100").
+    in-out property <float> zoom: 1.0;
+    in-out property <bool> magnify: true;
+    // Büyüme oranı 1.1..1.5 (gösterim: "1,25×" — virgüllü, iki ondalık).
+    in-out property <float> mag-max: 1.25;
+    // 0 = Şeffaf, 1 = Cam, 2 = Koyu
+    in-out property <int> appearance: 0;
+    in-out property <bool> auto-hide: false;
+    in-out property <bool> startup: true;
+    in-out property <bool> w-music: true;
+    in-out property <bool> w-weather: true;
+    in-out property <bool> w-stats: true;
+    in-out property <bool> w-system: true;
+    in-out property <bool> w-clock: true;
+    in-out property <bool> w-trash: true;
+    in property <color> accent: #0078d4;
+
+    // Her değişiklikte çağrılır; Rust yeni değeri property'den okur.
+    callback zoom-changed(float);
+    callback magnify-changed();
+    callback appearance-changed(int);
+    callback auto-hide-changed(bool);
+    callback startup-changed(bool);
+    callback widgets-changed();
+    callback reset();
+
+    preferred-width: 440px;
+    preferred-height: 700px;
+    min-width: 440px;
+    max-width: 440px;
+    min-height: 700px;
+    max-height: 700px;
+    background: #202020;
+    default-font-family: "Segoe UI";
+
+    // 1,25 gibi virgüllü, iki ondalıklı gösterim
+    pure function fmt-ratio(v: float) -> string {
+        // Yüzdelik birim (ör. 125)
+        let h = Math.round(v * 100);
+        let ip = Math.floor(h / 100);
+        let fp = h - ip * 100;
+        return ip + "," + (fp < 10 ? "0" : "") + fp + "×";
+    }
+
+    VerticalLayout {
+        ScrollView {
+            VerticalLayout {
+                padding: 20px;
+                spacing: 6px;
+
+                SectionTitle {
+                    text: "Dock";
+                }
+                Card {
+                    Row {
+                        label: "Boyut";
+                        Slider {
+                            width: 170px;
+                            minimum: 0.75;
+                            maximum: 1.25;
+                            value <=> root.zoom;
+                            changed(v) => {
+                                root.zoom = Math.round(v * 100) / 100;
+                                root.zoom-changed(root.zoom);
+                            }
+                        }
+                        ValueLabel {
+                            text: "%" + Math.round(root.zoom * 100);
+                        }
+                    }
+                    Row {
+                        label: "Büyütme";
+                        Switch {
+                            checked <=> root.magnify;
+                            toggled => {
+                                root.magnify-changed();
+                            }
+                        }
+                    }
+                    Row {
+                        label: "Büyüme oranı";
+                        Slider {
+                            width: 170px;
+                            minimum: 1.1;
+                            maximum: 1.5;
+                            enabled: root.magnify;
+                            value <=> root.mag-max;
+                            changed(v) => {
+                                root.mag-max = Math.round(v * 20) / 20;
+                                root.magnify-changed();
+                            }
+                        }
+                        ValueLabel {
+                            text: root.fmt-ratio(root.mag-max);
+                        }
+                    }
+                    Row {
+                        label: "Görünüm";
+                        ComboBox {
+                            width: 130px;
+                            model: ["Şeffaf", "Cam", "Koyu"];
+                            current-index <=> root.appearance;
+                            selected(v) => {
+                                root.appearance-changed(root.appearance);
+                            }
+                        }
+                    }
+                    Row {
+                        label: "Otomatik gizle";
+                        hint: "Kısayol: Ctrl+Alt+D";
+                        Switch {
+                            checked <=> root.auto-hide;
+                            toggled => {
+                                root.auto-hide-changed(root.auto-hide);
+                            }
+                        }
+                    }
+                    Row {
+                        label: "Windows ile başlat";
+                        last: true;
+                        Switch {
+                            checked <=> root.startup;
+                            toggled => {
+                                root.startup-changed(root.startup);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+                SectionTitle {
+                    text: "Widget'lar";
+                }
+                Card {
+                    Row {
+                        label: "Müzik";
+                        Switch {
+                            checked <=> root.w-music;
+                            toggled => {
+                                root.widgets-changed();
+                            }
+                        }
+                    }
+                    Row {
+                        label: "Hava durumu";
+                        Switch {
+                            checked <=> root.w-weather;
+                            toggled => {
+                                root.widgets-changed();
+                            }
+                        }
+                    }
+                    Row {
+                        label: "CPU ve RAM";
+                        Switch {
+                            checked <=> root.w-stats;
+                            toggled => {
+                                root.widgets-changed();
+                            }
+                        }
+                    }
+                    Row {
+                        label: "Ağ, ses ve pil";
+                        Switch {
+                            checked <=> root.w-system;
+                            toggled => {
+                                root.widgets-changed();
+                            }
+                        }
+                    }
+                    Row {
+                        label: "Saat ve tarih";
+                        Switch {
+                            checked <=> root.w-clock;
+                            toggled => {
+                                root.widgets-changed();
+                            }
+                        }
+                    }
+                    Row {
+                        label: "Geri Dönüşüm Kutusu";
+                        last: true;
+                        Switch {
+                            checked <=> root.w-trash;
+                            toggled => {
+                                root.widgets-changed();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Alt çubuk: sağda sıfırlama düğmesi
+        HorizontalLayout {
+            padding: 14px;
+            padding-top: 10px;
+            alignment: end;
+            Button {
+                text: "Varsayılanlara Dön";
+                clicked => {
+                    root.reset();
+                }
+            }
+        }
+    }
+}

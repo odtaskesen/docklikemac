@@ -1,0 +1,461 @@
+// Dock arayüzü — 2. aşama: uygulamalar, büyüme, sürükle-bırak.
+//
+// Pencere, dock gövdesinden büyüktür: üstte büyüyen ikonlar için boşluk,
+// yanlarda gövdenin genişlemesi için pay vardır. Bu saydam alanlar fareyi
+// yakalamasın diye Rust tarafı pencereye bölge (region) uygular: fare
+// dokunmuyorken sadece gövde tıklanabilir.
+
+import { MediaInfo, SysInfo, Hit, Look, Z, WidgetId, MusicWidget, WeatherWidget, StatsWidget, SystemArea } from "widgets.slint";
+import { SettingsWindow } from "settings.slint";
+export { MediaInfo, SysInfo, Z, SettingsWindow }
+
+export struct AppItem {
+    icon: image,
+    running: bool,
+    active: bool,
+    pinned: bool,
+    // Sabit uygulamanın penceresi yok ama süreci çalışıyor (tray'de).
+    background: bool,
+    // Açılış zıplaması (Rust sürer): yükseklik 0..1, büyümeyi bastırma 0..1.
+    bounce: float,
+    hold: float,
+}
+
+// Ölçüler (PLAN.md "Görünüm"): ikon 44 px, büyüme `Z.m` kat (varsayılan 1.25), köşe 16 px.
+global Theme {
+    out property <length> base: 44px * Z.k;
+    out property <length> max: 44px * Z.k * Z.m;
+    out property <length> pad: 8px * Z.k;
+    out property <length> spacing: 6px * Z.k;
+    out property <length> radius: 16px * Z.k;
+    // Büyümenin etki mesafesi (imleçten uzaklık).
+    out property <length> range: 125px * Z.k;
+    out property <length> body-height: 60px * Z.k;
+    // Büyüyen ikonlar için gövdenin üstündeki boşluk. Büyümüş ikonun üstü:
+    // gövde üstü + 8 (alt boşluk) + 44 - max yukarıda; 1.25 katta 3 px.
+    // En az 3 px (kullanıcı kararı: maximize pencerelerle 3 px boşluk).
+    out property <length> headroom: Math.max(3px * Z.k, 44px * Z.k * (Z.m - 1) - 8px * Z.k);
+}
+
+component StartLogo inherits Rectangle {
+    in property <length> s;
+    property <length> tile: s * 0.46;
+    property <length> gap: s * 0.08;
+    property <brush> fill: @linear-gradient(135deg, #63cdff 0%, #0f7ad8 100%);
+    width: s;
+    height: s;
+    Rectangle { x: 0; y: 0; width: tile; height: tile; border-radius: tile * 0.15; background: fill; }
+    Rectangle { x: tile + gap; y: 0; width: tile; height: tile; border-radius: tile * 0.15; background: fill; }
+    Rectangle { x: 0; y: tile + gap; width: tile; height: tile; border-radius: tile * 0.15; background: fill; }
+    Rectangle { x: tile + gap; y: tile + gap; width: tile; height: tile; border-radius: tile * 0.15; background: fill; }
+}
+
+// Bir dock hücresi: ikon kutusu alta hizalı, gösterge çizgisi alt boşlukta.
+component Slot inherits Rectangle {
+    in property <length> size;
+    in property <image> icon;
+    in property <bool> is-start;
+    in property <bool> running;
+    in property <bool> active;
+    in property <bool> in-tray;
+    in property <bool> pressed;
+    in property <bool> faded;
+    in property <color> accent;
+    // Açılış zıplaması 0..1: ikonun üstündeki boşluk kadar (alt boşluk + pencere payı) yükselir.
+    in property <float> lift;
+
+    width: size;
+
+    Rectangle {
+        x: 0;
+        y: root.height - Theme.pad - root.size - root.lift * (Theme.pad + Theme.headroom);
+        width: root.size;
+        height: root.size;
+        border-radius: root.size * 0.22;
+        background: root.pressed ? #ffffff30 : root.active ? #ffffff1e : transparent;
+        opacity: root.faded ? 0.3 : 1;
+
+        if !root.is-start: Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: root.size * 0.8;
+            height: root.size * 0.8;
+            source: root.icon;
+            image-fit: contain;
+        }
+        if root.is-start: StartLogo {
+            s: root.size * 0.45;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+
+    // Açık uygulama göstergesi: kısa gri çizgi; öndekinde uzun ve vurgu renginde.
+    // Penceresi olmayan, arka planda çalışan sabitlerde kırmızı.
+    if root.running || root.in-tray: Rectangle {
+        y: root.height - 5px * Z.k;
+        height: 3px * Z.k;
+        width: root.active ? 16px * Z.k : 6px * Z.k;
+        x: (root.width - self.width) / 2;
+        border-radius: 1.5px * Z.k;
+        background: root.active ? root.accent : root.running ? #ffffffa8 : #ff453a;
+        animate width { duration: 150ms; }
+    }
+}
+
+export component DockWindow inherits Window {
+    title: "Dock";
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-family: "Segoe UI";
+
+    // 0 = Şeffaf, 1 = Cam, 2 = Koyu
+    in property <int> mode: 0;
+    in property <[AppItem]> apps;
+    in property <bool> magnify-enabled: true;
+    in property <color> accent: #0078d4;
+    in property <MediaInfo> media;
+    in property <SysInfo> sys;
+    // Geri Dönüşüm Kutusu dolu mu.
+    in property <bool> trash-full;
+    // Yığın klasörlerinin ikonları (5f) ve ızgarası açık olanın sırası (-1: yok).
+    in property <[image]> stacks;
+    in property <int> stack-open: -1;
+    // Ayarlardan açılıp kapatılan widget'lar (5g).
+    in property <bool> w-music: true;
+    in property <bool> w-weather: true;
+    in property <bool> w-stats: true;
+    in property <bool> w-system: true;
+    in property <bool> w-clock: true;
+    in property <bool> w-trash: true;
+    property <bool> tail: root.stacks.length > 0 || root.w-trash;
+
+    callback start-clicked();
+    // Widget / sistem alanı tıklaması (kimlikler widgets.slint WidgetId).
+    callback widget-clicked(int);
+    // Widget / sistem alanı / çöp kutusu sağ tıkı.
+    callback widget-menu(int);
+    callback context-menu();
+    callback app-clicked(int);
+    callback app-menu(int);
+    callback app-reorder(int, int);
+    callback app-drag-out(int);
+    // Orta tık / Shift+tık: yeni pencere.
+    callback app-new-window(int);
+    // Fare tekerleği (delta mantıksal px, bir çentik = 60; aşağı = negatif).
+    callback app-scroll(int, float);
+    callback widget-scroll(int, float);
+    // Pencere önizlemesi için üzerinde durulan uygulama (-1: yok; basılı/sürüklerken de -1)
+    // ve ikonun büyümesiz merkezi (pencereye göre).
+    callback app-hover(int, length);
+    // Gövdenin konumu/boyutu değişti (cam arka planı için).
+    callback body-changed();
+
+    // Büyümesiz uygulama bölümünün sağ kenarı (Başlat + ayraç + uygulamalar).
+    property <length> apps-width: Theme.pad + (apps.length + 1) * (Theme.base + Theme.spacing) + 1px;
+    // Büyümesiz gövde genişliği: uygulamalar + ayraç + sağ bölüm (widget'lar, sistem alanı).
+    // Sağ uç (yığınlar + çöp kutusu) sadece biri varsa, ayracıyla birlikte.
+    out property <length> base-body-width: self.apps-width + 2 * Theme.spacing + 1px + right.preferred-width + Theme.pad
+        + (root.tail ? 2 * Theme.spacing + 1px + root.stacks.length * (Theme.base + Theme.spacing)
+            + (root.w-trash ? Theme.base : -Theme.spacing) : 0);
+    // Çöp kutusu hücresinin sol kenarı (Explorer'dan bırakılan dosyalar ve yığın
+    // konumları için, Rust okur). Çöp kutusu kapalıyken olacağı yer.
+    out property <length> trash-left: body.x + body.width - Theme.pad - (root.w-trash ? Theme.base : -Theme.spacing);
+    out property <length> base-left: (self.width - self.base-body-width) / 2;
+    out property <length> body-x: body.x;
+    out property <length> body-y: body.y;
+    out property <length> body-w: body.width;
+    out property <length> body-h: body.height;
+
+    width: self.base-body-width + 4 * (Theme.max - Theme.base);
+    height: Theme.body-height + Theme.headroom;
+
+    // Sürükleme durumu.
+    property <int> hover-slot: -1;
+    property <int> press-slot: -1;
+    property <int> mid-slot: -1;
+    property <length> press-x;
+    property <length> press-y;
+    property <bool> dragging: false;
+    property <int> drag-from: -1;
+    property <int> preview-slot: (root.press-slot >= 0 || root.dragging) ? -1 : root.hover-slot;
+    changed preview-slot => {
+        root.app-hover(self.preview-slot - 1, self.preview-slot >= 1 ? root.app-center(self.preview-slot - 1) : 0);
+    }
+
+    // Sadece uygulama bölümündeyken büyüt (widget'lar büyümez).
+    property <bool> in-apps: ta.mouse-x < self.base-left + self.apps-width + 10px * Z.k;
+    property <bool> mag-on: self.magnify-enabled && ta.has-hover && self.in-apps && !self.dragging;
+    // Büyüme oranı 0..1. Geçişi Rust sürer (dock.rs): Slint'in kendi animasyonu
+    // dock uzun süre boşta kalınca anında bitiyordu (ani "zıplama").
+    in property <float> mag: 0;
+    callback mag-target(bool);
+    changed mag-on => { root.mag-target(root.mag-on); }
+
+    // Widget'ların isabet testi için imleç bilgisini paylaş.
+    property <length> mx: ta.mouse-x;
+    property <length> my: ta.mouse-y;
+    property <bool> inside: ta.has-hover;
+    changed mx => { Hit.mx = self.mx; }
+    changed my => { Hit.my = self.my; }
+    changed inside => { Hit.inside = self.inside; }
+    init => { Look.shadow = self.mode == 0; }
+    changed mode => { Look.shadow = self.mode == 0; }
+
+    // Büyümesiz yerleşimdeki merkeze göre hücre boyutu (geri beslemesiz).
+    pure function slot-size(center: length) -> length {
+        if (root.mag <= 0) {
+            return Theme.base;
+        }
+        let d = abs(ta.mouse-x - center);
+        if (d >= Theme.range) {
+            return Theme.base;
+        }
+        return Theme.base + (Theme.max - Theme.base) * root.mag * (1 + cos(180deg * (d / Theme.range))) / 2;
+    }
+
+    pure function app-center(i: int) -> length {
+        return root.base-left + Theme.pad + Theme.base + 2 * Theme.spacing + 1px
+            + i * (Theme.base + Theme.spacing) + Theme.base / 2;
+    }
+
+    body := Rectangle {
+        y: parent.height - Theme.body-height;
+        height: Theme.body-height;
+        width: hl.preferred-width;
+        x: (parent.width - self.width) / 2;
+        border-radius: Theme.radius;
+        background: root.mode == 2 ? #1c1c1c : root.mode == 1 ? #20202030 : #00000001;
+        border-width: 1px;
+        border-color: root.mode == 2 ? #ffffff1a : #ffffff45;
+
+        changed width => { root.body-changed(); }
+        changed x => { root.body-changed(); }
+
+        hl := HorizontalLayout {
+            padding-left: Theme.pad;
+            padding-right: Theme.pad;
+            spacing: Theme.spacing;
+
+            start := Slot {
+                is-start: true;
+                size: root.slot-size(root.base-left + Theme.pad + Theme.base / 2);
+                accent: root.accent;
+                pressed: root.press-slot == 0 && root.hover-slot == 0 && !root.dragging;
+                property <bool> under: ta.has-hover && ta.mouse-x >= self.absolute-position.x && ta.mouse-x < self.absolute-position.x + self.width;
+                changed under => {
+                    if (self.under) {
+                        root.hover-slot = 0;
+                    } else if (root.hover-slot == 0) {
+                        root.hover-slot = -1;
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 1px;
+                Rectangle {
+                    y: parent.height * 0.25;
+                    height: parent.height * 0.5;
+                    background: #ffffff30;
+                }
+            }
+
+            for app[i] in root.apps: Slot {
+                // Zıplarken büyüme bastırılır (büyümüş ikonun üstünde yer yok).
+                size: Theme.base + (root.slot-size(root.app-center(i)) - Theme.base) * (1 - app.hold);
+                lift: app.bounce;
+                icon: app.icon;
+                running: app.running;
+                active: app.active;
+                in-tray: app.background;
+                accent: root.accent;
+                faded: root.dragging && root.drag-from == i;
+                pressed: root.press-slot == i + 1 && root.hover-slot == i + 1 && !root.dragging;
+                property <bool> under: ta.has-hover && ta.mouse-x >= self.absolute-position.x && ta.mouse-x < self.absolute-position.x + self.width;
+                changed under => {
+                    if (self.under) {
+                        root.hover-slot = i + 1;
+                    } else if (root.hover-slot == i + 1) {
+                        root.hover-slot = -1;
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 1px;
+                Rectangle {
+                    y: parent.height * 0.25;
+                    height: parent.height * 0.5;
+                    background: #ffffff30;
+                }
+            }
+
+            // Sağ bölüm: widget'lar + sistem alanı. Büyümez.
+            right := HorizontalLayout {
+                padding-top: Theme.pad;
+                padding-bottom: Theme.pad;
+                spacing: 12px * Z.w;
+                if root.w-music: MusicWidget { m: root.media; }
+                if root.w-weather: WeatherWidget { s: root.sys; }
+                if root.w-stats: StatsWidget { s: root.sys; accent: root.accent; }
+                if root.w-music || root.w-weather || root.w-stats: Rectangle {
+                    width: 1px;
+                    Rectangle {
+                        y: parent.height * 0.15;
+                        height: parent.height * 0.7;
+                        background: #ffffff30;
+                    }
+                }
+                SystemArea { s: root.sys; show-system: root.w-system; show-clock: root.w-clock; }
+            }
+
+            if root.tail: Rectangle {
+                width: 1px;
+                Rectangle {
+                    y: parent.height * 0.25;
+                    height: parent.height * 0.5;
+                    background: #ffffff30;
+                }
+            }
+
+            // Yığınlar: çöp kutusunun solunda, büyümez. Tık/sağ tık `Hit` üzerinden.
+            for icon[i] in root.stacks: Rectangle {
+                width: Theme.base;
+                property <int> wid: WidgetId.stack + i;
+                property <bool> under: ta.has-hover && ta.mouse-x >= self.absolute-position.x && ta.mouse-x < self.absolute-position.x + self.width;
+                changed under => { Hit.set(self.wid, self.under); }
+                Rectangle {
+                    y: parent.height - Theme.pad - Theme.base;
+                    width: Theme.base;
+                    height: Theme.base;
+                    border-radius: Theme.base * 0.22;
+                    background: Hit.hot == parent.wid && Hit.pressed == parent.wid ? #ffffff30
+                        : root.stack-open == i ? #ffffff1e : transparent;
+                    Image {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: Theme.base * 0.8;
+                        height: Theme.base * 0.8;
+                        source: icon;
+                        image-fit: contain;
+                    }
+                }
+            }
+
+            // Geri Dönüşüm Kutusu: en sağda, büyümez. Tık/sağ tık `Hit` üzerinden.
+            if root.w-trash: Rectangle {
+                width: Theme.base;
+                property <bool> under: ta.has-hover && ta.mouse-x >= self.absolute-position.x && ta.mouse-x < self.absolute-position.x + self.width;
+                changed under => { Hit.set(WidgetId.trash, self.under); }
+                Rectangle {
+                    y: parent.height - Theme.pad - Theme.base;
+                    width: Theme.base;
+                    height: Theme.base;
+                    border-radius: Theme.base * 0.22;
+                    background: Hit.hot == WidgetId.trash && (root.dragging || Hit.pressed == WidgetId.trash) ? #ffffff30 : transparent;
+                    Image {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: Theme.base * 0.8;
+                        height: Theme.base * 0.8;
+                        source: root.trash-full ? @image-url("icons/trash-full.svg") : @image-url("icons/trash-empty.svg");
+                        image-fit: contain;
+                    }
+                }
+            }
+        }
+    }
+
+    // Sürüklenen ikonun imleci izleyen kopyası.
+    if root.dragging && root.drag-from >= 0 && root.drag-from < root.apps.length: Image {
+        source: root.apps[root.drag-from].icon;
+        width: Theme.base * 0.9;
+        height: Theme.base * 0.9;
+        x: ta.mouse-x - self.width / 2;
+        y: ta.mouse-y - self.height / 2;
+        opacity: 0.85;
+    }
+
+    // Tüm fare olaylarını tek bir dokunma alanı karşılar (büyüme hesabı için
+    // imleç konumu her zaman güncel olmalı).
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left) {
+                if (e.kind == PointerEventKind.down) {
+                    Hit.pressed = Hit.hot;
+                    root.press-slot = root.hover-slot;
+                    root.press-x = self.mouse-x;
+                    root.press-y = self.mouse-y;
+                    root.dragging = false;
+                } else if (e.kind == PointerEventKind.up) {
+                    if (root.dragging) {
+                        // Dışarı ya da çöp kutusuna bırakılan sabit kaldırılır.
+                        if (self.mouse-y < 0 || Hit.hot == WidgetId.trash) {
+                            root.app-drag-out(root.drag-from);
+                        } else if (root.hover-slot >= 1 && root.hover-slot - 1 != root.drag-from) {
+                            root.app-reorder(root.drag-from, root.hover-slot - 1);
+                        } else if (root.hover-slot == 0 && root.drag-from != 0) {
+                            root.app-reorder(root.drag-from, 0);
+                        }
+                    } else if (root.press-slot >= 0 && root.press-slot == root.hover-slot) {
+                        if (root.press-slot == 0) {
+                            root.start-clicked();
+                        } else if (e.modifiers.shift) {
+                            root.app-new-window(root.press-slot - 1);
+                        } else {
+                            root.app-clicked(root.press-slot - 1);
+                        }
+                    } else if (Hit.pressed >= 0 && Hit.pressed == Hit.hot) {
+                        root.widget-clicked(Hit.pressed);
+                    }
+                    Hit.pressed = -1;
+                    root.press-slot = -1;
+                    root.dragging = false;
+                    root.drag-from = -1;
+                } else if (e.kind == PointerEventKind.cancel) {
+                    Hit.pressed = -1;
+                    root.press-slot = -1;
+                    root.dragging = false;
+                    root.drag-from = -1;
+                }
+            } else if (e.button == PointerEventButton.middle) {
+                if (e.kind == PointerEventKind.down) {
+                    root.mid-slot = root.hover-slot;
+                } else if (e.kind == PointerEventKind.up) {
+                    if (root.mid-slot >= 1 && root.mid-slot == root.hover-slot) {
+                        root.app-new-window(root.mid-slot - 1);
+                    }
+                    root.mid-slot = -1;
+                }
+            } else if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                if (root.hover-slot >= 1) {
+                    root.app-menu(root.hover-slot - 1);
+                } else if (Hit.hot == WidgetId.trash || Hit.hot >= WidgetId.stack) {
+                    root.widget-menu(Hit.hot);
+                } else {
+                    root.context-menu();
+                }
+            }
+        }
+        scroll-event(e) => {
+            if (root.hover-slot >= 1) {
+                root.app-scroll(root.hover-slot - 1, e.delta-y / 1px);
+                return accept;
+            }
+            if (Hit.hot >= 0) {
+                root.widget-scroll(Hit.hot, e.delta-y / 1px);
+                return accept;
+            }
+            return reject;
+        }
+        moved => {
+            if (root.press-slot >= 1 && !root.dragging
+                && (abs(self.mouse-x - root.press-x) > 6px * Z.k || abs(self.mouse-y - root.press-y) > 6px * Z.k)) {
+                root.dragging = true;
+                root.drag-from = root.press-slot - 1;
+            }
+        }
+    }
+}

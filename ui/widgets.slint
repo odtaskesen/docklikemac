@@ -1,0 +1,423 @@
+// Widget'lar (müzik, hava durumu, CPU/RAM) ve sistem alanı (tray, ağ/ses/pil, saat, zil).
+//
+// Dock'ta tüm fare olaylarını tek bir TouchArea alır (büyüme hesabı için).
+// Bu yüzden tıklanabilir öğeler kendi altlarında imleç olup olmadığını `Hit`
+// üzerinden hesaplar; tıklamayı kök bileşen `widget-clicked(id)` ile bildirir.
+
+export struct MediaInfo {
+    active: bool,
+    title: string,
+    artist: string,
+    playing: bool,
+    progress: float,
+    has-progress: bool,
+    art: image,
+    has-art: bool,
+    can-prev: bool,
+    can-next: bool,
+}
+
+export struct SysInfo {
+    cpu: float,
+    ram: float,
+    net-icon: string,
+    volume-icon: string,
+    battery: bool,
+    battery-percent: int,
+    charging: bool,
+    time: string,
+    date: string,
+    weather-has: bool,
+    weather-icon: string,
+    weather-temp: string,
+    weather-desc: string,
+}
+
+// Dock boyutu ölçeği (kullanıcı ayarı, %75–%125). Dock ölçüleri `k` ile çarpılır.
+// Widget'lar dock küçülürken küçülmez (yazılar okunmaz oluyordu, kullanıcı
+// isteği 2026-11-25); büyürken dock'la aynı. Sığmayanlar (kapak, halkalar)
+// gövdeye göre sınırlanır.
+export global Z {
+    in-out property <float> k: 1;
+    // Büyüme oranı (en büyük ikon / normal ikon), kullanıcı ayarı 1.1–1.5.
+    in-out property <float> m: 1.25;
+    out property <float> w: k >= 1 ? k : 1;
+}
+
+// Tıklanabilir widget öğelerinin kimlikleri (Rust tarafıyla aynı).
+export global WidgetId {
+    out property <int> media-prev: 1;
+    out property <int> media-toggle: 2;
+    out property <int> media-next: 3;
+    out property <int> tray: 10;
+    out property <int> quick: 11;
+    out property <int> clock: 12;
+    out property <int> bell: 13;
+    out property <int> trash: 20;
+    // Yığınlar: 30 + sıra.
+    out property <int> stack: 30;
+}
+
+export global Hit {
+    in-out property <length> mx;
+    in-out property <length> my;
+    in-out property <bool> inside;
+    in-out property <int> hot: -1;
+    in-out property <int> pressed: -1;
+
+    public function set(id: int, on: bool) {
+        if (on) {
+            Hit.hot = id;
+        } else if (Hit.hot == id) {
+            Hit.hot = -1;
+        }
+    }
+}
+
+// Şeffaf modda yazı ve ikonların altına gölge (açık duvar kâğıdında okunsun).
+export global Look {
+    in-out property <bool> shadow: true;
+}
+
+export component Icon inherits Rectangle {
+    in property <string> name;
+    in property <length> size: 16px * Z.w;
+    in property <brush> tint: white;
+    width: size;
+    height: size;
+
+    property <image> src:
+        name == "bell" ? @image-url("icons/bell.svg") :
+        name == "chevron-up" ? @image-url("icons/chevron-up.svg") :
+        name == "music" ? @image-url("icons/music.svg") :
+        name == "play" ? @image-url("icons/play.svg") :
+        name == "pause" ? @image-url("icons/pause.svg") :
+        name == "prev" ? @image-url("icons/prev.svg") :
+        name == "next" ? @image-url("icons/next.svg") :
+        name == "clear-day" ? @image-url("icons/clear-day.svg") :
+        name == "clear-night" ? @image-url("icons/clear-night.svg") :
+        name == "partly-day" ? @image-url("icons/partly-day.svg") :
+        name == "partly-night" ? @image-url("icons/partly-night.svg") :
+        name == "cloudy" ? @image-url("icons/cloudy.svg") :
+        name == "fog" ? @image-url("icons/fog.svg") :
+        name == "drizzle" ? @image-url("icons/drizzle.svg") :
+        name == "rain" ? @image-url("icons/rain.svg") :
+        name == "snow" ? @image-url("icons/snow.svg") :
+        name == "thunder" ? @image-url("icons/thunder.svg") :
+        name == "wifi-0" ? @image-url("icons/wifi-0.svg") :
+        name == "wifi-1" ? @image-url("icons/wifi-1.svg") :
+        name == "wifi-2" ? @image-url("icons/wifi-2.svg") :
+        name == "wifi-3" ? @image-url("icons/wifi-3.svg") :
+        name == "wifi-4" ? @image-url("icons/wifi-4.svg") :
+        name == "wifi-off" ? @image-url("icons/wifi-off.svg") :
+        name == "ethernet" ? @image-url("icons/ethernet.svg") :
+        name == "no-network" ? @image-url("icons/no-network.svg") :
+        name == "volume-mute" ? @image-url("icons/volume-mute.svg") :
+        name == "volume-0" ? @image-url("icons/volume-0.svg") :
+        name == "volume-1" ? @image-url("icons/volume-1.svg") :
+        name == "volume-2" ? @image-url("icons/volume-2.svg") :
+        name == "volume-3" ? @image-url("icons/volume-3.svg") :
+        @image-url("icons/music.svg");
+
+    if Look.shadow: Image {
+        x: 1px;
+        y: 1px;
+        width: root.size;
+        height: root.size;
+        source: root.src;
+        colorize: #000000a0;
+    }
+    Image {
+        width: root.size;
+        height: root.size;
+        source: root.src;
+        colorize: root.tint;
+    }
+}
+
+// Gölgeli, taşınca "…" ile kısalan yazı.
+export component SText inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 12px * Z.w;
+    in property <int> font-weight: 400;
+    in property <color> text-color: white;
+    in property <TextHorizontalAlignment> align: left;
+
+    preferred-width: t.preferred-width;
+    min-width: 0;
+    height: t.preferred-height;
+
+    if Look.shadow: Text {
+        x: 1px;
+        y: 1px;
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        color: #000000b0;
+        overflow: elide;
+        horizontal-alignment: root.align;
+        vertical-alignment: center;
+    }
+    t := Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        color: root.text-color;
+        overflow: elide;
+        horizontal-alignment: root.align;
+        vertical-alignment: center;
+    }
+}
+
+// Üzerine gelinince açık zemin gösteren tıklanabilir alan.
+component HitBox inherits Rectangle {
+    in property <int> wid;
+    in property <length> pad: 6px * Z.w;
+
+    property <bool> under: Hit.inside
+        && Hit.mx >= self.absolute-position.x && Hit.mx < self.absolute-position.x + self.width
+        && Hit.my >= self.absolute-position.y && Hit.my < self.absolute-position.y + self.height;
+    changed under => { Hit.set(root.wid, self.under); }
+
+    border-radius: 6px * Z.w;
+    background: Hit.pressed == root.wid && Hit.hot == root.wid ? #ffffff2a
+        : Hit.hot == root.wid ? #ffffff18 : transparent;
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        alignment: center;
+        padding-left: root.pad;
+        padding-right: root.pad;
+        spacing: 6px * Z.w;
+        @children
+    }
+}
+
+component IconButton inherits HitBox {
+    in property <string> icon;
+    in property <length> icon-size: 16px * Z.w;
+    in property <bool> enabled: true;
+    pad: 0;
+    width: 28px * Z.w;
+    VerticalLayout {
+        alignment: center;
+        Icon {
+            name: root.icon;
+            size: root.icon-size;
+            tint: root.enabled ? white : #ffffff50;
+        }
+    }
+}
+
+export component MusicWidget inherits Rectangle {
+    in property <MediaInfo> m;
+
+    HorizontalLayout {
+        spacing: 8px * Z.w;
+
+        if !root.m.active: VerticalLayout {
+            alignment: center;
+            padding-left: 4px * Z.w;
+            padding-right: 4px * Z.w;
+            Icon { name: "music"; size: 20px * Z.w; tint: #ffffff70; }
+        }
+
+        if root.m.active: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                // Gövdeye sığsın: gövde 60·k, üst/alt boşluk 8·k.
+                width: min(40px * Z.w, 44px * Z.k - 2px);
+                height: self.width;
+                border-radius: 6px * Z.w;
+                clip: true;
+                background: #ffffff18;
+                if root.m.has-art: Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.m.art;
+                    image-fit: cover;
+                }
+                if !root.m.has-art: Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    name: "music";
+                    size: 20px * Z.w;
+                    tint: #ffffff90;
+                }
+            }
+        }
+
+        if root.m.active: VerticalLayout {
+            width: 130px * Z.w;
+            alignment: center;
+            spacing: 1px;
+            SText { text: root.m.title; font-size: 12px * Z.w; font-weight: 600; }
+            SText { text: root.m.artist; font-size: 11px * Z.w; text-color: #ffffffa8; }
+            if root.m.has-progress: Rectangle {
+                height: 6px * Z.w;
+                Rectangle {
+                    y: 2px * Z.w;
+                    height: 3px * Z.w;
+                    border-radius: 1.5px * Z.w;
+                    background: #ffffff30;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * clamp(root.m.progress, 0, 1);
+                        border-radius: 1.5px * Z.w;
+                        background: #ffffffd8;
+                    }
+                }
+            }
+        }
+
+        if root.m.active: HorizontalLayout {
+            spacing: 0;
+            IconButton { wid: WidgetId.media-prev; icon: "prev"; icon-size: 14px * Z.w; enabled: root.m.can-prev; }
+            IconButton { wid: WidgetId.media-toggle; icon: root.m.playing ? "pause" : "play"; icon-size: 16px * Z.w; }
+            IconButton { wid: WidgetId.media-next; icon: "next"; icon-size: 14px * Z.w; enabled: root.m.can-next; }
+        }
+    }
+}
+
+export component WeatherWidget inherits Rectangle {
+    in property <SysInfo> s;
+
+    HorizontalLayout {
+        spacing: 6px * Z.w;
+        if root.s.weather-has: VerticalLayout {
+            alignment: center;
+            Icon { name: root.s.weather-icon; size: 26px * Z.w; }
+        }
+        if root.s.weather-has: VerticalLayout {
+            alignment: center;
+            SText { text: root.s.weather-temp; font-size: 14px * Z.w; font-weight: 600; }
+            SText { text: root.s.weather-desc; font-size: 10px * Z.w; text-color: #ffffffa8; max-width: 92px * Z.w; }
+        }
+    }
+}
+
+// Yüzde halkası (CPU / RAM).
+component Ring inherits Rectangle {
+    in property <float> value;
+    in property <string> label;
+    in property <color> accent;
+
+    // Gövdeye sığsın: halka + alttaki etiket kadar yer.
+    property <length> d: min(28px * Z.w, root.height - 11px * Z.w);
+    property <float> v: clamp(root.value, 0, 1);
+    width: 32px * Z.w;
+
+    // Halka (arka plan + değer yayı), dikeyde ortalı.
+    Rectangle {
+        x: (parent.width - root.d) / 2;
+        y: (parent.height - root.d - 11px * Z.w) / 2;
+        width: root.d;
+        height: root.d;
+
+        Rectangle {
+            border-radius: root.d / 2;
+            border-width: 3px * Z.w;
+            border-color: #ffffff26;
+        }
+        if root.v > 0.005: Path {
+            width: root.d;
+            height: root.d;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            stroke: root.v > 0.85 ? #ff6b6b : root.accent;
+            stroke-width: 3px * Z.w;
+            fill: transparent;
+            commands: root.v >= 0.999
+                ? "M 50 5.36 A 44.64 44.64 0 1 1 49.99 5.36"
+                : "M 50 5.36 A 44.64 44.64 0 " + (root.v > 0.5 ? "1" : "0") + " 1 "
+                    + (50 + 44.64 * sin(root.v * 360deg)) + " " + (50 - 44.64 * cos(root.v * 360deg));
+        }
+        SText {
+            width: parent.width;
+            y: (parent.height - self.height) / 2;
+            text: round(root.v * 100);
+            font-size: 9px * Z.w;
+            font-weight: 600;
+            align: center;
+        }
+        SText {
+            width: parent.width + 8px * Z.w;
+            x: -4px * Z.w;
+            y: parent.height + 1px;
+            text: root.label;
+            font-size: 8px * Z.w;
+            text-color: #ffffffa0;
+            align: center;
+        }
+    }
+}
+
+export component StatsWidget inherits Rectangle {
+    in property <SysInfo> s;
+    in property <color> accent;
+    HorizontalLayout {
+        spacing: 4px * Z.w;
+        Ring { value: root.s.cpu; label: "CPU"; accent: root.accent; }
+        Ring { value: root.s.ram; label: "RAM"; accent: root.accent; }
+    }
+}
+
+component Battery inherits Rectangle {
+    in property <int> percent;
+    in property <bool> charging;
+    width: 24px * Z.w;
+    height: 12px * Z.w;
+
+    if Look.shadow: Rectangle {
+        x: 1px; y: 1px; width: 21px * Z.w; height: 12px * Z.w;
+        border-radius: 3px * Z.w; border-width: 1.3px * Z.w; border-color: #00000090;
+    }
+    Rectangle {
+        x: 0; y: 0; width: 21px * Z.w; height: 12px * Z.w;
+        border-radius: 3px * Z.w;
+        border-width: 1.3px * Z.w;
+        border-color: white;
+        Rectangle {
+            x: 2.3px * Z.w;
+            y: 2.3px * Z.w;
+            height: parent.height - 4.6px * Z.w;
+            width: (parent.width - 4.6px * Z.w) * clamp(root.percent / 100, 0, 1);
+            border-radius: 1.2px * Z.w;
+            background: root.charging ? #4cd964 : root.percent <= 15 ? #ff5f57 : white;
+        }
+    }
+    Rectangle { x: 22px * Z.w; y: 4px * Z.w; width: 2px * Z.w; height: 4px * Z.w; border-radius: 1px; background: white; }
+}
+
+export component SystemArea inherits Rectangle {
+    in property <SysInfo> s;
+    in property <bool> show-system: true;
+    in property <bool> show-clock: true;
+
+    HorizontalLayout {
+        spacing: 2px * Z.w;
+        IconButton { wid: WidgetId.tray; icon: "chevron-up"; icon-size: 14px * Z.w; }
+        if root.show-system: HitBox {
+            wid: WidgetId.quick;
+            VerticalLayout { alignment: center; Icon { name: root.s.net-icon; size: 16px * Z.w; } }
+            VerticalLayout { alignment: center; Icon { name: root.s.volume-icon; size: 16px * Z.w; } }
+            if root.s.battery: VerticalLayout {
+                alignment: center;
+                Battery { percent: root.s.battery-percent; charging: root.s.charging; }
+            }
+        }
+        if root.show-clock: HitBox {
+            wid: WidgetId.clock;
+            VerticalLayout {
+                alignment: center;
+                SText { text: root.s.time; font-size: 12px * Z.w; align: right; }
+                SText { text: root.s.date; font-size: 11px * Z.w; align: right; }
+            }
+        }
+        IconButton { wid: WidgetId.bell; icon: "bell"; icon-size: 16px * Z.w; }
+    }
+}

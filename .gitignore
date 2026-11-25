@@ -1,0 +1,6 @@
+/target
+tools/_real_config.json
+tools/_real_run.txt
+tools/_diag.txt
+*.png
+!docs/*.png

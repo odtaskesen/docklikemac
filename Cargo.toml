@@ -1,0 +1,68 @@
+[package]
+name = "dock"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slint = { version = "1", features = ["raw-window-handle-06"] }
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_Networking_WinHttp",
+    "Win32_System_Power",
+    "Win32_System_SystemInformation",
+] }
+# COM arayüzleri (ikonlar, AppUserModelID, kısayol çözme) için.
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Graphics_Imaging",
+    "Media_Control",
+    "Networking_Connectivity",
+    "Storage_Streams",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# `#[implement]` makrosu (COM geri çağrıları) bu adla erişilebilir olmasını bekliyor.
+windows-core = "0.61"
+
+[build-dependencies]
+slint-build = "1"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "s"
+codegen-units = 1
